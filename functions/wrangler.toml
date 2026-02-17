@@ -1,7 +1,0 @@
-name = "freethread-moderation"
-main = "index.js"
-compatibility_date = "2024-12-01"
-
-[[kv_namespaces]]
-binding = "SANCTIONS"
-id = "YOUR_KV_NAMESPACE_ID"

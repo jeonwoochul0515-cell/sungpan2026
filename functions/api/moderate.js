@@ -57,7 +57,6 @@ async function verifyFirebaseToken(idToken) {
   if (payload.iss !== `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`) throw new Error('Invalid issuer');
   if (!payload.sub) throw new Error('No subject');
 
-  // Fetch Google's JWK public keys
   const jwkRes = await fetch(
     'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com'
   );
@@ -65,7 +64,6 @@ async function verifyFirebaseToken(idToken) {
   const jwk = jwkData.keys.find(k => k.kid === header.kid);
   if (!jwk) throw new Error('Key not found');
 
-  // Import public key and verify signature
   const key = await crypto.subtle.importKey(
     'jwk', jwk,
     { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
@@ -80,147 +78,135 @@ async function verifyFirebaseToken(idToken) {
   const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, signature, data);
   if (!valid) throw new Error('Invalid signature');
 
-  return payload.sub; // uid
+  return payload.sub;
 }
 
 // === Helpers ===
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+// === Pages Function Handlers ===
+export async function onRequestOptions() {
+  return new Response(null, {
+    status: 204,
     headers: {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      'Content-Type': 'application/json',
     },
   });
 }
 
-// === Cloudflare Worker Entry ===
-export default {
-  async fetch(request, env) {
-    // CORS preflight
-    if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        status: 204,
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'POST, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-        },
-      });
-    }
+export async function onRequestPost(context) {
+  const { request, env } = context;
 
-    if (request.method !== 'POST') {
-      return jsonResponse({ error: 'Method not allowed' }, 405);
-    }
+  // 1. Verify Firebase Auth token
+  const authHeader = request.headers.get('Authorization');
+  if (!authHeader?.startsWith('Bearer ')) {
+    return jsonResponse({ error: 'Unauthorized' }, 401);
+  }
 
-    // 1. Verify Firebase Auth token
-    const authHeader = request.headers.get('Authorization');
-    if (!authHeader?.startsWith('Bearer ')) {
-      return jsonResponse({ error: 'Unauthorized' }, 401);
-    }
+  let uid;
+  try {
+    uid = await verifyFirebaseToken(authHeader.slice(7));
+  } catch (e) {
+    return jsonResponse({ error: 'Invalid token' }, 401);
+  }
 
-    let uid;
-    try {
-      uid = await verifyFirebaseToken(authHeader.slice(7));
-    } catch (e) {
-      return jsonResponse({ error: 'Invalid token' }, 401);
-    }
+  // 2. Validate input
+  const { text, type } = await request.json();
+  if (!text || typeof text !== 'string') return jsonResponse({ error: 'Invalid text' }, 400);
+  if (!['post', 'comment'].includes(type)) return jsonResponse({ error: 'Invalid type' }, 400);
 
-    // 2. Validate input
-    const { text, type } = await request.json();
-    if (!text || typeof text !== 'string') return jsonResponse({ error: 'Invalid text' }, 400);
-    if (!['post', 'comment'].includes(type)) return jsonResponse({ error: 'Invalid type' }, 400);
+  // 3. Check ban status (Cloudflare KV)
+  try {
+    const sanctionKey = `sanctions:${uid}`;
+    const stored = await env.SANCTIONS.get(sanctionKey, 'json');
 
-    // 3. Check ban status (Cloudflare KV)
-    try {
-      const sanctionKey = `sanctions:${uid}`;
-      const stored = await env.SANCTIONS.get(sanctionKey, 'json');
-
-      if (stored) {
-        if (stored.permanently_banned) {
-          return jsonResponse({
-            allowed: false, blocked: true,
-            message: '영구차단된 사용자입니다. 게시판 이용이 제한됩니다.',
-          });
-        }
-        if (stored.banned_until && Date.now() < new Date(stored.banned_until).getTime()) {
-          const remaining = new Date(stored.banned_until).getTime() - Date.now();
-          const hours = Math.ceil(remaining / (1000 * 60 * 60));
-          const displayTime = hours >= 24 ? Math.ceil(hours / 24) + '일' : hours + '시간';
-          return jsonResponse({
-            allowed: false, blocked: true,
-            message: `임시차단 중입니다. 약 ${displayTime} 후에 이용 가능합니다.`,
-          });
-        }
-      }
-
-      // 4. Call Claude API for moderation
-      let moderationResult;
-      try {
-        const res = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': env.ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01',
-          },
-          body: JSON.stringify({
-            model: 'claude-3-haiku-20240307',
-            max_tokens: 200,
-            system: SYSTEM_PROMPT,
-            messages: [{ role: 'user', content: text.substring(0, 2000) }],
-          }),
+    if (stored) {
+      if (stored.permanently_banned) {
+        return jsonResponse({
+          allowed: false, blocked: true,
+          message: '영구차단된 사용자입니다. 게시판 이용이 제한됩니다.',
         });
-        const data = await res.json();
-        moderationResult = JSON.parse(data.content[0].text.trim());
-      } catch (e) {
-        // Fail-open: Claude API 오류 시 허용
-        return jsonResponse({ allowed: true });
       }
-
-      // 5. No violation → allow
-      if (!moderationResult.violation) {
-        return jsonResponse({ allowed: true });
+      if (stored.banned_until && Date.now() < new Date(stored.banned_until).getTime()) {
+        const remaining = new Date(stored.banned_until).getTime() - Date.now();
+        const hours = Math.ceil(remaining / (1000 * 60 * 60));
+        const displayTime = hours >= 24 ? Math.ceil(hours / 24) + '일' : hours + '시간';
+        return jsonResponse({
+          allowed: false, blocked: true,
+          message: `임시차단 중입니다. 약 ${displayTime} 후에 이용 가능합니다.`,
+        });
       }
+    }
 
-      // 6. Violation → apply sanctions
-      const currentCount = stored?.violation_count || 0;
-      const newCount = currentCount + 1;
-      const tier = getSanctionTier(newCount);
-
-      const violations = stored?.violations || [];
-      violations.push({
-        type: moderationResult.type,
-        reason: moderationResult.reason,
-        content_type: type,
-        text_snippet: text.substring(0, 100),
-        timestamp: new Date().toISOString(),
+    // 4. Call Claude API for moderation
+    let moderationResult;
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-3-haiku-20240307',
+          max_tokens: 200,
+          system: SYSTEM_PROMPT,
+          messages: [{ role: 'user', content: text.substring(0, 2000) }],
+        }),
       });
-
-      const sanctionData = {
-        violation_count: newCount,
-        last_violation: new Date().toISOString(),
-        permanently_banned: tier.action === 'permanent_ban',
-        banned_until: tier.action === 'temp_ban'
-          ? new Date(Date.now() + tier.duration).toISOString()
-          : null,
-        violations,
-      };
-
-      await env.SANCTIONS.put(sanctionKey, JSON.stringify(sanctionData));
-
-      return jsonResponse({
-        allowed: false,
-        blocked: tier.action !== 'warning',
-        warning: tier.action === 'warning',
-        message: tier.message + '\n사유: ' + moderationResult.reason,
-      });
-
+      const data = await res.json();
+      moderationResult = JSON.parse(data.content[0].text.trim());
     } catch (e) {
-      // Fail-open: 예상치 못한 오류 시 허용
       return jsonResponse({ allowed: true });
     }
-  },
-};
+
+    // 5. No violation → allow
+    if (!moderationResult.violation) {
+      return jsonResponse({ allowed: true });
+    }
+
+    // 6. Violation → apply sanctions
+    const currentCount = stored?.violation_count || 0;
+    const newCount = currentCount + 1;
+    const tier = getSanctionTier(newCount);
+
+    const violations = stored?.violations || [];
+    violations.push({
+      type: moderationResult.type,
+      reason: moderationResult.reason,
+      content_type: type,
+      text_snippet: text.substring(0, 100),
+      timestamp: new Date().toISOString(),
+    });
+
+    const sanctionData = {
+      violation_count: newCount,
+      last_violation: new Date().toISOString(),
+      permanently_banned: tier.action === 'permanent_ban',
+      banned_until: tier.action === 'temp_ban'
+        ? new Date(Date.now() + tier.duration).toISOString()
+        : null,
+      violations,
+    };
+
+    await env.SANCTIONS.put(sanctionKey, JSON.stringify(sanctionData));
+
+    return jsonResponse({
+      allowed: false,
+      blocked: tier.action !== 'warning',
+      warning: tier.action === 'warning',
+      message: tier.message + '\n사유: ' + moderationResult.reason,
+    });
+
+  } catch (e) {
+    return jsonResponse({ allowed: true });
+  }
+}

@@ -680,7 +680,7 @@ function showAllComments() {
 }
 
 // === Content Moderation ===
-const MODERATION_URL = 'https://freethread-moderation.YOUR_SUBDOMAIN.workers.dev';
+const MODERATION_URL = '/api/moderate';
 
 async function checkModeration(text, type) {
   try {
