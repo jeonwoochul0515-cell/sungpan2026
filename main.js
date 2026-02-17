@@ -53,19 +53,6 @@ const pageDetail = document.getElementById('page-detail');
 const passModal = document.getElementById('pass-modal');
 const passModalClose = document.getElementById('pass-modal-close');
 const btnVerifyCta = document.getElementById('btn-verify-cta');
-const passStep1 = document.getElementById('pass-step-1');
-const passStep2 = document.getElementById('pass-step-2');
-const passStep3 = document.getElementById('pass-step-3');
-const passStep4 = document.getElementById('pass-step-4');
-const passName = document.getElementById('pass-name');
-const passPhone = document.getElementById('pass-phone');
-const passBirth = document.getElementById('pass-birth');
-const passAgreeCheck = document.getElementById('pass-agree-check');
-const btnPassRequest = document.getElementById('btn-pass-request');
-const passOtp = document.getElementById('pass-otp');
-const passTimerValue = document.getElementById('pass-timer-value');
-const btnPassVerify = document.getElementById('btn-pass-verify');
-const btnPassResend = document.getElementById('btn-pass-resend');
 const passProcessing = document.getElementById('pass-processing');
 const passResult = document.getElementById('pass-result');
 const passResultText = document.getElementById('pass-result-text');
@@ -122,9 +109,9 @@ let commentMediaFile = null;
 let viewerOpen = false;
 let viewerTimerInterval = null;
 
-// PASS state
-let selectedCarrier = null;
-let passTimerInterval = null;
+// PortOne
+const IMP = window.IMP;
+IMP.init('YOUR_PORTONE_MERCHANT_ID'); // TODO: 포트원 가맹점 식별코드 입력
 
 // === Helpers ===
 function timeAgo(timestamp) {
@@ -174,148 +161,73 @@ function setAdultVerified() {
   localStorage.setItem('freethread_adult', 'true');
 }
 
-// === PASS Modal Functions ===
-function openPassModal() {
-  resetPassForm();
-  passModal.classList.remove('hidden');
-}
-
+// === PASS (PortOne) Functions ===
 function closePassModal() {
   passModal.classList.add('hidden');
-  clearPassTimer();
 }
 
-function showPassStep(stepNum) {
-  [passStep1, passStep2, passStep3, passStep4].forEach(s => s.classList.add('hidden'));
-  const target = [passStep1, passStep2, passStep3, passStep4][stepNum - 1];
-  if (target) target.classList.remove('hidden');
-}
-
-function resetPassForm() {
-  passName.value = '';
-  passPhone.value = '';
-  passBirth.value = '';
-  passAgreeCheck.checked = false;
-  passOtp.value = '';
-  selectedCarrier = null;
-  clearPassTimer();
-  // Reset carrier selection
-  document.querySelectorAll('.carrier-btn').forEach(b => b.classList.remove('selected'));
-  // Show step 1
-  showPassStep(1);
-  // Reset step 4
+function resetPassModal() {
   passProcessing.classList.remove('hidden');
   passResult.classList.add('hidden');
   passFailResult.classList.add('hidden');
-  btnPassRequest.disabled = false;
 }
 
-function clearPassTimer() {
-  if (passTimerInterval) {
-    clearInterval(passTimerInterval);
-    passTimerInterval = null;
+function showPassResult(success, message) {
+  passProcessing.classList.add('hidden');
+  if (success) {
+    passResult.classList.remove('hidden');
+    passResultText.textContent = message || '성인인증이 완료되었습니다';
+  } else {
+    passFailResult.classList.remove('hidden');
+    passFailText.textContent = message || '인증에 실패했습니다';
   }
 }
 
-function startPassTimer() {
-  clearPassTimer();
-  let remaining = 180; // 3 minutes
-  passTimerValue.textContent = '3:00';
-  passTimerInterval = setInterval(() => {
-    remaining--;
-    const min = Math.floor(remaining / 60);
-    const sec = remaining % 60;
-    passTimerValue.textContent = min + ':' + String(sec).padStart(2, '0');
-    if (remaining <= 0) {
-      clearPassTimer();
-      passTimerValue.textContent = '시간 만료';
+async function startCertification() {
+  // 먼저 익명 로그인 (UID 확보 → CI 매핑용)
+  try {
+    await signInAnonymously(auth);
+  } catch (e) {
+    alert('인증 준비에 실패했습니다. 다시 시도해주세요.');
+    return;
+  }
+
+  IMP.certification({
+    merchant_uid: 'cert_' + Date.now(),
+    popup: true,
+  }, async (response) => {
+    // Show processing modal
+    resetPassModal();
+    passModal.classList.remove('hidden');
+
+    if (!response.success) {
+      showPassResult(false, response.error_msg || '본인인증이 취소되었습니다');
+      return;
     }
-  }, 1000);
-}
 
-function selectCarrier(carrier, btnEl) {
-  selectedCarrier = carrier;
-  document.querySelectorAll('.carrier-btn').forEach(b => b.classList.remove('selected'));
-  btnEl.classList.add('selected');
-  setTimeout(() => showPassStep(2), 200);
-}
+    // Verify on backend (ID 토큰으로 UID 전달)
+    try {
+      const idToken = await auth.currentUser.getIdToken();
+      const res = await fetch('/api/verify', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + idToken,
+        },
+        body: JSON.stringify({ imp_uid: response.imp_uid }),
+      });
+      const data = await res.json();
 
-function requestOtp() {
-  const name = passName.value.trim();
-  const phone = passPhone.value.trim();
-  const birth = passBirth.value.trim();
-
-  if (!name) { alert('이름을 입력해주세요.'); return; }
-  if (!/^\d{10,11}$/.test(phone)) { alert('올바른 전화번호를 입력해주세요.'); return; }
-  if (!/^\d{6}$/.test(birth)) { alert('생년월일 6자리를 입력해주세요.'); return; }
-  if (!passAgreeCheck.checked) { alert('약관에 동의해주세요.'); return; }
-
-  // INTEGRATION POINT: 실제 PASS API (NICE/KG이니시스) 연동 시 여기에 OTP 요청 API 호출
-  btnPassRequest.disabled = true;
-  showPassStep(3);
-  startPassTimer();
-}
-
-function simulateAgeCheck(birthdate6) {
-  // Parse YYMMDD
-  let year = parseInt(birthdate6.substring(0, 2));
-  const month = parseInt(birthdate6.substring(2, 4));
-  const day = parseInt(birthdate6.substring(4, 6));
-  // 00~25 → 2000s, 26~99 → 1900s
-  year = year <= 25 ? 2000 + year : 1900 + year;
-
-  const birthDate = new Date(year, month - 1, day);
-  const today = new Date();
-  let age = today.getFullYear() - birthDate.getFullYear();
-  const monthDiff = today.getMonth() - birthDate.getMonth();
-  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
-    age--;
-  }
-  return age >= 19;
-}
-
-async function verifyOtp() {
-  const otp = passOtp.value.trim();
-  if (!/^\d{6}$/.test(otp)) { alert('인증번호 6자리를 입력해주세요.'); return; }
-
-  clearPassTimer();
-
-  // Show processing
-  showPassStep(4);
-  passProcessing.classList.remove('hidden');
-  passResult.classList.add('hidden');
-  passFailResult.classList.add('hidden');
-
-  // INTEGRATION POINT: 실제 PASS API 연동 시 여기에 OTP 검증 API 호출
-  // 시뮬레이션: 1.5초 후 결과 표시
-  const birthVal = passBirth.value.trim();
-
-  setTimeout(async () => {
-    const isAdult = simulateAgeCheck(birthVal);
-
-    // 폼 데이터 완전 폐기 (서버 전송 없음)
-    passName.value = '';
-    passPhone.value = '';
-    passBirth.value = '';
-    passOtp.value = '';
-    passAgreeCheck.checked = false;
-
-    passProcessing.classList.add('hidden');
-
-    if (isAdult) {
-      try {
-        await signInAnonymously(auth);
-      } catch (e) {
-        // Anonymous auth 실패해도 게이트는 통과 허용
+      if (data.verified) {
+        setAdultVerified();
+        showPassResult(true, '성인인증이 완료되었습니다');
+      } else {
+        showPassResult(false, data.message || '인증에 실패했습니다');
       }
-      setAdultVerified();
-      passResult.classList.remove('hidden');
-      passResultText.textContent = '성인인증이 완료되었습니다';
-    } else {
-      passFailResult.classList.remove('hidden');
-      passFailText.textContent = '만 19세 미만은 이용할 수 없습니다';
+    } catch (e) {
+      showPassResult(false, '서버 오류가 발생했습니다. 다시 시도해주세요.');
     }
-  }, 1500);
+  });
 }
 
 function enterBoard() {
@@ -990,26 +902,13 @@ document.addEventListener('click', (e) => {
 });
 
 // === PASS Event Listeners ===
-btnVerifyCta.addEventListener('click', openPassModal);
+btnVerifyCta.addEventListener('click', startCertification);
 passModalClose.addEventListener('click', closePassModal);
-
-// Carrier selection
-document.querySelectorAll('.carrier-btn').forEach(btn => {
-  btn.addEventListener('click', () => selectCarrier(btn.dataset.carrier, btn));
-});
-
-btnPassRequest.addEventListener('click', requestOtp);
-btnPassVerify.addEventListener('click', verifyOtp);
-btnPassResend.addEventListener('click', () => {
-  showPassStep(2);
-  btnPassRequest.disabled = false;
-});
 btnPassEnter.addEventListener('click', enterBoard);
 btnPassRetry.addEventListener('click', () => {
-  resetPassForm();
+  closePassModal();
+  startCertification();
 });
-
-// Close modal on backdrop click
 passModal.addEventListener('click', (e) => {
   if (e.target === passModal) closePassModal();
 });

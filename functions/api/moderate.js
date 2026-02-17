@@ -199,6 +199,17 @@ export async function onRequestPost(context) {
 
     await env.SANCTIONS.put(sanctionKey, JSON.stringify(sanctionData));
 
+    // 영구차단 시 CI 해시도 차단 등록 (차단 우회 방지)
+    if (tier.action === 'permanent_ban') {
+      const ciHash = await env.SANCTIONS.get(`uid_ci:${uid}`);
+      if (ciHash) {
+        await env.SANCTIONS.put(`ci_ban:${ciHash}`, JSON.stringify({
+          banned_at: new Date().toISOString(),
+          uid,
+        }));
+      }
+    }
+
     return jsonResponse({
       allowed: false,
       blocked: tier.action !== 'warning',

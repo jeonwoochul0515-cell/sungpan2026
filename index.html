@@ -187,55 +187,15 @@
     <div id="pass-modal" class="pass-modal hidden">
       <div class="pass-modal-content">
         <div class="pass-modal-header">
-          <span class="pass-modal-title">PASS 본인인증</span>
+          <span class="pass-modal-title">본인인증</span>
           <button class="pass-modal-close" id="pass-modal-close">&times;</button>
         </div>
 
-        <!-- Step 1: Carrier Select -->
-        <div class="pass-step" id="pass-step-1">
-          <p class="pass-step-label">통신사를 선택해주세요</p>
-          <div class="carrier-grid">
-            <button class="carrier-btn" data-carrier="SKT">SKT</button>
-            <button class="carrier-btn" data-carrier="KT">KT</button>
-            <button class="carrier-btn" data-carrier="LGU+">LG U+</button>
-            <button class="carrier-btn" data-carrier="SKT 알뜰폰">SKT 알뜰폰</button>
-            <button class="carrier-btn" data-carrier="KT 알뜰폰">KT 알뜰폰</button>
-            <button class="carrier-btn" data-carrier="LGU+ 알뜰폰">LGU+ 알뜰폰</button>
-          </div>
-        </div>
-
-        <!-- Step 2: Personal Info -->
-        <div class="pass-step hidden" id="pass-step-2">
-          <p class="pass-step-label">본인 정보를 입력해주세요</p>
-          <div class="pass-form">
-            <input type="text" id="pass-name" class="pass-input" placeholder="이름" maxlength="20" autocomplete="off" />
-            <input type="tel" id="pass-phone" class="pass-input" placeholder="전화번호 (- 없이)" maxlength="11" autocomplete="off" />
-            <input type="text" id="pass-birth" class="pass-input" placeholder="생년월일 6자리 (예: 900101)" maxlength="6" autocomplete="off" />
-            <label class="pass-agree">
-              <input type="checkbox" id="pass-agree-check" />
-              <span>본인인증 서비스 이용약관에 동의합니다</span>
-            </label>
-            <div class="pass-privacy-notice">🔒 입력된 정보는 인증 즉시 폐기되며 서버에 저장되지 않습니다</div>
-            <button class="btn-pass-request" id="btn-pass-request">인증번호 요청</button>
-          </div>
-        </div>
-
-        <!-- Step 3: OTP Input -->
-        <div class="pass-step hidden" id="pass-step-3">
-          <p class="pass-step-label">인증번호를 입력해주세요</p>
-          <p class="pass-timer" id="pass-timer">남은 시간: <span id="pass-timer-value">3:00</span></p>
-          <input type="text" id="pass-otp" class="pass-otp-input" placeholder="인증번호 6자리" maxlength="6" autocomplete="off" />
-          <div class="pass-otp-actions">
-            <button class="btn-pass-verify" id="btn-pass-verify">인증 확인</button>
-            <button class="btn-pass-resend" id="btn-pass-resend">재전송</button>
-          </div>
-        </div>
-
-        <!-- Step 4: Processing / Result -->
-        <div class="pass-step hidden" id="pass-step-4">
+        <!-- Processing / Result -->
+        <div class="pass-step" id="pass-step-processing">
           <div class="pass-processing" id="pass-processing">
             <div class="pass-spinner"></div>
-            <p>인증 처리 중...</p>
+            <p>인증 확인 중...</p>
           </div>
           <div class="pass-result hidden" id="pass-result">
             <div class="pass-success">
@@ -267,6 +227,7 @@
     </div>
   </div>
 
+  <script src="https://cdn.iamport.kr/v1/iamport.js"></script>
   <script type="module" src="/main.js"></script>
 </body>
 </html>
