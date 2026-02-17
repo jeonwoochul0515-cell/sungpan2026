@@ -679,6 +679,37 @@ function showAllComments() {
   commentListEl.firstElementChild?.scrollIntoView({ behavior: 'smooth' });
 }
 
+// === Content Moderation ===
+const MODERATION_URL = 'https://freethread-moderation.YOUR_SUBDOMAIN.workers.dev';
+
+async function checkModeration(text, type) {
+  try {
+    const user = auth.currentUser;
+    if (!user) return { allowed: true };
+    const idToken = await user.getIdToken();
+    const res = await fetch(MODERATION_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + idToken,
+      },
+      body: JSON.stringify({ text, type }),
+    });
+    if (!res.ok) return { allowed: true };
+    return await res.json();
+  } catch (e) {
+    return { allowed: true };
+  }
+}
+
+function showModerationAlert(result) {
+  if (result.blocked) {
+    alert(result.message);
+  } else if (result.warning) {
+    alert(result.message);
+  }
+}
+
 // === Create Post ===
 async function submitPost() {
   const title = inputTitle.value.trim();
@@ -689,9 +720,18 @@ async function submitPost() {
   }
 
   btnSubmitPost.disabled = true;
-  btnSubmitPost.textContent = postMediaFile ? '업로드 중...' : '등록 중...';
+  btnSubmitPost.textContent = '검토 중...';
 
   try {
+    // Content moderation check
+    const modResult = await checkModeration(title + '\n' + content, 'post');
+    if (!modResult.allowed) {
+      showModerationAlert(modResult);
+      return;
+    }
+
+    btnSubmitPost.textContent = postMediaFile ? '업로드 중...' : '등록 중...';
+
     const postData = {
       title,
       content,
@@ -739,6 +779,15 @@ async function sendComment() {
   btnSendComment.disabled = true;
 
   try {
+    // Content moderation check (text only)
+    if (content) {
+      const modResult = await checkModeration(content, 'comment');
+      if (!modResult.allowed) {
+        showModerationAlert(modResult);
+        return;
+      }
+    }
+
     const commentData = {
       content: content || '',
       createdAt: serverTimestamp(),
