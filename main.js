@@ -292,10 +292,17 @@ function showPassResult(success, message) {
 
 async function startCertification() {
   try {
-    await signInAnonymously(auth);
+    if (!auth.currentUser) {
+      await signInAnonymously(auth);
+    }
   } catch (e) {
-    alert('인증 준비에 실패했습니다. 다시 시도해주세요.');
-    return;
+    // Retry once
+    try {
+      await signInAnonymously(auth);
+    } catch (e2) {
+      alert('인증 준비에 실패했습니다. 네트워크 연결을 확인 후 다시 시도해주세요.');
+      return;
+    }
   }
 
   IMP.certification({
@@ -1410,12 +1417,12 @@ window.addEventListener('scroll', () => {
 // === Init ===
 setupProtections();
 
-// Ensure anonymous auth for UID tracking
-signInAnonymously(auth).catch(() => {});
-
-if (checkAdultGate()) {
-  showPage(pageList);
-  loadThreads();
-} else {
-  showPage(pageLanding);
-}
+// Ensure anonymous auth for UID tracking, then load page
+signInAnonymously(auth).catch(() => {}).finally(() => {
+  if (checkAdultGate()) {
+    showPage(pageList);
+    loadThreads();
+  } else {
+    showPage(pageLanding);
+  }
+});
