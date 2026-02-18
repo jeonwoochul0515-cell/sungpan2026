@@ -154,7 +154,9 @@ let replyToPreview = '';
 
 // PortOne
 const IMP = window.IMP;
-IMP.init('YOUR_PORTONE_MERCHANT_ID'); // TODO: 포트원 가맹점 식별코드 입력
+if (IMP) {
+  IMP.init('YOUR_PORTONE_MERCHANT_ID'); // TODO: 포트원 가맹점 식별코드 입력
+}
 
 // === Helpers ===
 function timeAgo(timestamp) {
@@ -178,7 +180,7 @@ function timeAgo(timestamp) {
 function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
-  return div.innerHTML;
+  return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function getCurrentUid() {
@@ -291,6 +293,11 @@ function showPassResult(success, message) {
 }
 
 async function startCertification() {
+  if (!IMP) {
+    alert('인증 모듈을 불러올 수 없습니다. 페이지를 새로고침 해주세요.');
+    return;
+  }
+
   try {
     if (!auth.currentUser) {
       await signInAnonymously(auth);
@@ -433,6 +440,12 @@ function buildMediaField(file, uploaded, destructTypeVal, destructVal) {
 }
 
 function showThumbPreview(file, thumbEl) {
+  // Revoke previous object URLs to prevent memory leak
+  const prevImg = thumbEl.querySelector('img');
+  const prevVideo = thumbEl.querySelector('video');
+  if (prevImg && prevImg.src.startsWith('blob:')) URL.revokeObjectURL(prevImg.src);
+  if (prevVideo && prevVideo.src.startsWith('blob:')) URL.revokeObjectURL(prevVideo.src);
+
   thumbEl.innerHTML = '';
   if (file.type.startsWith('image')) {
     const img = document.createElement('img');
@@ -1044,6 +1057,12 @@ async function deletePost() {
 
   if (!confirm('이 스레드를 삭제하시겠습니까? 모든 댓글도 함께 삭제됩니다.')) return;
 
+  // Unsubscribe from real-time comments before deleting
+  if (commentsUnsubscribe) {
+    commentsUnsubscribe();
+    commentsUnsubscribe = null;
+  }
+
   try {
     // Delete all comments first
     const commentsSnap = await getDocs(collection(db, 'posts', currentPostId, 'comments'));
@@ -1144,14 +1163,22 @@ function updateInputStackPositions() {
   const hasMedia = !commentMediaPreview.classList.contains('hidden');
   const barHeight = 64;
   const replyHeight = 40;
+  const mediaHeight = 60;
+  let totalBottom = barHeight;
 
-  if (hasReply && hasMedia) {
-    replyIndicator.style.bottom = barHeight + 'px';
-    commentMediaPreview.style.bottom = (barHeight + replyHeight) + 'px';
-  } else if (hasReply) {
-    replyIndicator.style.bottom = barHeight + 'px';
-  } else if (hasMedia) {
-    commentMediaPreview.style.bottom = barHeight + 'px';
+  if (hasReply) {
+    replyIndicator.style.bottom = totalBottom + 'px';
+    totalBottom += replyHeight;
+  }
+  if (hasMedia) {
+    commentMediaPreview.style.bottom = (hasReply ? barHeight + replyHeight : barHeight) + 'px';
+    totalBottom = barHeight + (hasReply ? replyHeight : 0) + mediaHeight;
+  }
+
+  // Adjust detail container padding to prevent content from hiding behind stacked UI
+  const detailContainer = document.querySelector('.detail-container');
+  if (detailContainer) {
+    detailContainer.style.paddingBottom = (totalBottom + 8) + 'px';
   }
 }
 

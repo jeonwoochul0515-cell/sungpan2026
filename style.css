@@ -1381,7 +1381,7 @@ html, body {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  opacity: 0;
+  opacity: 0.4;
   transition: opacity 0.15s, color 0.15s;
 }
 
@@ -1438,7 +1438,7 @@ html, body {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  opacity: 0;
+  opacity: 0.4;
   transition: opacity 0.15s, color 0.15s;
 }
 
@@ -1551,6 +1551,7 @@ html, body {
 
 .thread-item:active {
   transform: scale(0.99);
+  background-color: var(--bg-secondary);
 }
 
 /* Gold accent on header */
