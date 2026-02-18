@@ -10,6 +10,7 @@
   <link href="/style.css" rel="stylesheet">
 </head>
 <body>
+  <div class="bg-texture"></div>
   <div id="app">
     <!-- Page: Landing (Adult Verification Gate) -->
     <div id="page-landing" class="page">
@@ -43,6 +44,13 @@
     <div id="page-list" class="page hidden">
       <header class="site-header">
         <h1>프리스레드</h1>
+        <div class="search-bar">
+          <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+          </svg>
+          <input type="text" id="search-input" class="search-input" placeholder="스레드 검색..." maxlength="100" />
+          <button class="btn-search-clear hidden" id="btn-search-clear">&times;</button>
+        </div>
       </header>
 
       <main class="board-container">
@@ -135,7 +143,12 @@
           </svg>
         </button>
         <h2 id="detail-header-title">스레드</h2>
-        <div style="width:48px"></div>
+        <button class="btn-delete-post hidden" id="btn-delete-post" title="삭제">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+          </svg>
+        </button>
+        <div id="detail-actions" style="width:48px"></div>
       </header>
       <div class="detail-container">
         <div class="detail-post">

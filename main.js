@@ -8,9 +8,13 @@ import {
   getDoc,
   getDocs,
   updateDoc,
+  deleteDoc,
   deleteField,
   query,
   orderBy,
+  limit,
+  startAfter,
+  onSnapshot,
   increment,
   serverTimestamp,
   Timestamp,
@@ -42,6 +46,12 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 const storage = getStorage(app);
 const auth = getAuth(app);
+
+// === Constants ===
+const PAGE_SIZE = 20;
+const MAX_IMAGE_DIMENSION = 1920;
+const IMAGE_QUALITY = 0.8;
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
 // === DOM Refs ===
 const pageLanding = document.getElementById('page-landing');
@@ -102,12 +112,32 @@ const viewerClose = document.getElementById('viewer-close');
 const viewerBody = document.getElementById('viewer-body');
 const viewerMedia = document.getElementById('viewer-media');
 
+// Search DOM refs
+const searchInput = document.getElementById('search-input');
+const btnSearchClear = document.getElementById('btn-search-clear');
+
+// Delete DOM refs
+const detailActions = document.getElementById('detail-actions');
+const btnDeletePost = document.getElementById('btn-delete-post');
+
 // === State ===
 let currentPostId = null;
 let postMediaFile = null;
 let commentMediaFile = null;
 let viewerOpen = false;
 let viewerTimerInterval = null;
+
+// Pagination state
+let lastVisibleThread = null;
+let isLoadingMore = false;
+let hasMoreThreads = true;
+let threadsData = []; // cached thread data for search
+
+// Real-time state
+let commentsUnsubscribe = null;
+
+// Search state
+let searchQuery = '';
 
 // PortOne
 const IMP = window.IMP;
@@ -138,7 +168,17 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+function getCurrentUid() {
+  return auth.currentUser?.uid || null;
+}
+
 function showPage(page) {
+  // Cleanup real-time subscriptions when leaving pages
+  if (commentsUnsubscribe) {
+    commentsUnsubscribe();
+    commentsUnsubscribe = null;
+  }
+
   pageLanding.classList.add('hidden');
   pageList.classList.add('hidden');
   pageCreate.classList.add('hidden');
@@ -150,6 +190,60 @@ function showPage(page) {
   }
   page.classList.remove('hidden');
   window.scrollTo(0, 0);
+}
+
+// === Image Compression ===
+function compressImage(file) {
+  return new Promise((resolve) => {
+    if (!file.type.startsWith('image/') || file.type === 'image/gif') {
+      resolve(file);
+      return;
+    }
+
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+
+      let { width, height } = img;
+
+      // Skip if already small enough
+      if (width <= MAX_IMAGE_DIMENSION && height <= MAX_IMAGE_DIMENSION && file.size <= 2 * 1024 * 1024) {
+        resolve(file);
+        return;
+      }
+
+      // Scale down
+      if (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) {
+        const ratio = Math.min(MAX_IMAGE_DIMENSION / width, MAX_IMAGE_DIMENSION / height);
+        width = Math.round(width * ratio);
+        height = Math.round(height * ratio);
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+
+      canvas.toBlob(
+        (blob) => {
+          if (blob && blob.size < file.size) {
+            resolve(new File([blob], file.name, { type: 'image/jpeg', lastModified: Date.now() }));
+          } else {
+            resolve(file);
+          }
+        },
+        'image/jpeg',
+        IMAGE_QUALITY
+      );
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(file);
+    };
+    img.src = url;
+  });
 }
 
 // === Adult Gate ===
@@ -184,7 +278,6 @@ function showPassResult(success, message) {
 }
 
 async function startCertification() {
-  // 먼저 익명 로그인 (UID 확보 → CI 매핑용)
   try {
     await signInAnonymously(auth);
   } catch (e) {
@@ -196,7 +289,6 @@ async function startCertification() {
     merchant_uid: 'cert_' + Date.now(),
     popup: true,
   }, async (response) => {
-    // Show processing modal
     resetPassModal();
     passModal.classList.remove('hidden');
 
@@ -205,7 +297,6 @@ async function startCertification() {
       return;
     }
 
-    // Verify on backend (ID 토큰으로 UID 전달)
     try {
       const idToken = await auth.currentUser.getIdToken();
       const res = await fetch('/api/verify', {
@@ -274,11 +365,23 @@ const destroyedIcon = `<svg width="16" height="16" viewBox="0 0 24 24" fill="non
   <circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
 </svg>`;
 
+const deleteIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+  <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+</svg>`;
+
 // === Media Upload ===
 async function uploadMedia(file) {
+  // Compress images before upload
+  const processedFile = await compressImage(file);
+
+  // Check file size
+  if (processedFile.size > MAX_FILE_SIZE) {
+    throw new Error('파일 크기가 10MB를 초과합니다.');
+  }
+
   const path = 'media/' + Date.now() + '_' + Math.random().toString(36).slice(2);
   const storageRef = ref(storage, path);
-  await uploadBytes(storageRef, file);
+  await uploadBytes(storageRef, processedFile);
   const url = await getDownloadURL(storageRef);
   return { url, storagePath: path };
 }
@@ -379,10 +482,8 @@ function openViewer(mediaUrl, mediaType, media, docPath) {
     viewerMedia.appendChild(img);
   }
 
-  // Update info
   updateViewerInfo(media);
 
-  // Start countdown timer for time-based
   if (media.destructType === 'time') {
     viewerTimerInterval = setInterval(() => {
       if (isMediaExpired(media)) {
@@ -412,7 +513,6 @@ function closeViewer() {
 }
 
 async function handleMediaCardClick(media, docPath) {
-  // Check expiry
   const expired = await checkAndDestroyIfExpired(media, docPath);
   if (expired) {
     alert('이미 파괴된 미디어입니다.');
@@ -420,15 +520,12 @@ async function handleMediaCardClick(media, docPath) {
     return;
   }
 
-  // Increment view count for view-based
   if (media.destructType === 'views') {
     const docRef = typeof docPath === 'string' ? doc(db, docPath) : docPath;
     await updateDoc(docRef, { 'media.viewCount': increment(1) });
     media.viewCount = (media.viewCount || 0) + 1;
 
-    // Check if this view exhausts the limit
     if (media.viewCount >= media.maxViews) {
-      // Show one last time, then destroy
       openViewer(media.url, media.type, media, docPath);
       return;
     }
@@ -437,34 +534,63 @@ async function handleMediaCardClick(media, docPath) {
   openViewer(media.url, media.type, media, docPath);
 }
 
-// === Thread List ===
+// === Thread List (Pagination) ===
+function renderThreadItems(threads) {
+  return threads.map(item => {
+    const post = item.data;
+    const hasMedia = post.media && !isMediaExpired(post.media);
+    return `
+      <div class="thread-item" data-id="${item.id}">
+        <span class="thread-title">${hasMedia ? lockIcon : ''}${escapeHtml(post.title)}</span>
+        <span class="thread-meta">
+          <span class="thread-comments">
+            ${commentIcon}
+            <span>${post.commentCount || 0}</span>
+          </span>
+          <span class="thread-time">${timeAgo(post.createdAt)}</span>
+        </span>
+      </div>
+    `;
+  }).join('');
+}
+
 async function loadThreads() {
+  // Reset pagination state
+  lastVisibleThread = null;
+  hasMoreThreads = true;
+  threadsData = [];
+  isLoadingMore = false;
+
   threadListEl.innerHTML = '<div class="loading-msg">불러오는 중...</div>';
+
   try {
-    const q = query(collection(db, 'posts'), orderBy('lastActivityAt', 'desc'));
+    const q = query(
+      collection(db, 'posts'),
+      orderBy('lastActivityAt', 'desc'),
+      limit(PAGE_SIZE)
+    );
     const snapshot = await getDocs(q);
 
     if (snapshot.empty) {
       threadListEl.innerHTML = '<div class="empty-msg">아직 스레드가 없습니다. 첫 번째 스레드를 작성해보세요!</div>';
+      hasMoreThreads = false;
       return;
     }
 
-    threadListEl.innerHTML = snapshot.docs.map(docSnap => {
-      const post = docSnap.data();
-      const hasMedia = post.media && !isMediaExpired(post.media);
-      return `
-        <div class="thread-item" data-id="${docSnap.id}">
-          <span class="thread-title">${hasMedia ? lockIcon : ''}${escapeHtml(post.title)}</span>
-          <span class="thread-meta">
-            <span class="thread-comments">
-              ${commentIcon}
-              <span>${post.commentCount || 0}</span>
-            </span>
-            <span class="thread-time">${timeAgo(post.createdAt)}</span>
-          </span>
-        </div>
-      `;
-    }).join('');
+    threadsData = snapshot.docs.map(docSnap => ({
+      id: docSnap.id,
+      data: docSnap.data(),
+      docSnap,
+    }));
+
+    lastVisibleThread = snapshot.docs[snapshot.docs.length - 1];
+    hasMoreThreads = snapshot.docs.length >= PAGE_SIZE;
+
+    threadListEl.innerHTML = renderThreadItems(threadsData);
+
+    if (hasMoreThreads) {
+      threadListEl.insertAdjacentHTML('beforeend', '<div class="load-more-indicator" id="load-more-indicator">더 불러오는 중...</div>');
+    }
 
     // Auto-cleanup expired media
     snapshot.docs.forEach(docSnap => {
@@ -476,9 +602,94 @@ async function loadThreads() {
   }
 }
 
-// === Thread Detail ===
+async function loadMoreThreads() {
+  if (isLoadingMore || !hasMoreThreads || !lastVisibleThread) return;
+
+  isLoadingMore = true;
+
+  try {
+    const q = query(
+      collection(db, 'posts'),
+      orderBy('lastActivityAt', 'desc'),
+      startAfter(lastVisibleThread),
+      limit(PAGE_SIZE)
+    );
+    const snapshot = await getDocs(q);
+
+    if (snapshot.empty) {
+      hasMoreThreads = false;
+      const indicator = document.getElementById('load-more-indicator');
+      if (indicator) indicator.remove();
+      isLoadingMore = false;
+      return;
+    }
+
+    const newThreads = snapshot.docs.map(docSnap => ({
+      id: docSnap.id,
+      data: docSnap.data(),
+      docSnap,
+    }));
+
+    threadsData = [...threadsData, ...newThreads];
+    lastVisibleThread = snapshot.docs[snapshot.docs.length - 1];
+    hasMoreThreads = snapshot.docs.length >= PAGE_SIZE;
+
+    // Remove existing indicator
+    const indicator = document.getElementById('load-more-indicator');
+    if (indicator) indicator.remove();
+
+    // Append new threads
+    threadListEl.insertAdjacentHTML('beforeend', renderThreadItems(newThreads));
+
+    // Re-add indicator if more available
+    if (hasMoreThreads) {
+      threadListEl.insertAdjacentHTML('beforeend', '<div class="load-more-indicator" id="load-more-indicator">더 불러오는 중...</div>');
+    }
+
+    // Auto-cleanup expired media
+    snapshot.docs.forEach(docSnap => {
+      const post = docSnap.data();
+      if (post.media) checkAndDestroyIfExpired(post.media, 'posts/' + docSnap.id);
+    });
+  } catch (err) {
+    // Silently fail for load more
+  }
+
+  isLoadingMore = false;
+}
+
+// === Search ===
+function filterThreads(queryStr) {
+  searchQuery = queryStr.trim().toLowerCase();
+
+  if (!searchQuery) {
+    // Show all loaded threads
+    threadListEl.innerHTML = renderThreadItems(threadsData);
+    if (hasMoreThreads) {
+      threadListEl.insertAdjacentHTML('beforeend', '<div class="load-more-indicator" id="load-more-indicator">더 불러오는 중...</div>');
+    }
+    btnSearchClear.classList.add('hidden');
+    return;
+  }
+
+  btnSearchClear.classList.remove('hidden');
+
+  const filtered = threadsData.filter(item =>
+    item.data.title.toLowerCase().includes(searchQuery) ||
+    (item.data.content && item.data.content.toLowerCase().includes(searchQuery))
+  );
+
+  if (filtered.length === 0) {
+    threadListEl.innerHTML = `<div class="empty-msg">'${escapeHtml(queryStr)}'에 대한 검색 결과가 없습니다.</div>`;
+  } else {
+    threadListEl.innerHTML = renderThreadItems(filtered);
+  }
+}
+
+// === Thread Detail (Real-time Comments) ===
 let detailMediaData = null;
 let detailMediaDocPath = null;
+let detailPostAuthorUid = null;
 
 async function loadDetail(postId) {
   currentPostId = postId;
@@ -492,18 +703,15 @@ async function loadDetail(postId) {
   commentListEl.innerHTML = '';
   detailMediaData = null;
   detailMediaDocPath = null;
+  detailPostAuthorUid = null;
+
+  // Hide delete button by default
+  if (btnDeletePost) btnDeletePost.classList.add('hidden');
 
   try {
+    // Load post data
     const postRef = doc(db, 'posts', postId);
-    const commentsQuery = query(
-      collection(db, 'posts', postId, 'comments'),
-      orderBy('createdAt', 'asc')
-    );
-
-    const [postSnap, commentsSnap] = await Promise.all([
-      getDoc(postRef),
-      getDocs(commentsQuery),
-    ]);
+    const postSnap = await getDoc(postRef);
 
     if (!postSnap.exists()) {
       detailTitle.textContent = '삭제된 게시글';
@@ -515,25 +723,58 @@ async function loadDetail(postId) {
     detailTitle.textContent = post.title;
     detailContent.textContent = post.content;
     detailTime.textContent = timeAgo(post.createdAt) + ' 전';
-    detailCommentCount.textContent = post.commentCount || commentsSnap.size;
+    detailPostAuthorUid = post.authorUid || null;
+
+    // Show delete button if current user is the author
+    if (btnDeletePost && detailPostAuthorUid && detailPostAuthorUid === getCurrentUid()) {
+      btnDeletePost.classList.remove('hidden');
+    }
 
     // Show media card if present
     if (post.media) {
       detailMediaData = post.media;
       detailMediaDocPath = 'posts/' + postId;
       detailMediaSlot.innerHTML = mediaCardHtml(post.media, 'post');
-      // Auto-cleanup if expired
       checkAndDestroyIfExpired(post.media, detailMediaDocPath);
     }
 
-    const commentsData = commentsSnap.docs.map(d => ({
-      id: d.id,
-      ...d.data(),
-    }));
-    renderComments(commentsData, postId);
+    // Real-time comments with onSnapshot
+    const commentsQuery = query(
+      collection(db, 'posts', postId, 'comments'),
+      orderBy('createdAt', 'asc')
+    );
+
+    commentsUnsubscribe = onSnapshot(commentsQuery, (snapshot) => {
+      const comments = snapshot.docs.map(d => ({
+        id: d.id,
+        ...d.data(),
+      }));
+      detailCommentCount.textContent = comments.length;
+      renderComments(comments, postId);
+    }, (error) => {
+      // Fallback: load once if onSnapshot fails
+      loadCommentsOnce(postId);
+    });
+
   } catch (err) {
     detailTitle.textContent = '오류 발생';
     detailContent.textContent = '게시글을 불러올 수 없습니다.';
+  }
+}
+
+async function loadCommentsOnce(postId) {
+  try {
+    const commentsSnap = await getDocs(
+      query(
+        collection(db, 'posts', postId, 'comments'),
+        orderBy('createdAt', 'asc')
+      )
+    );
+    const comments = commentsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    detailCommentCount.textContent = comments.length;
+    renderComments(comments, postId);
+  } catch (err) {
+    // ignore
   }
 }
 
@@ -543,6 +784,7 @@ let allComments = [];
 let allCommentsPostId = null;
 
 function renderCommentItems(comments, postId) {
+  const uid = getCurrentUid();
   return comments.map(c => {
     let mediaHtml = '';
     if (c.media) {
@@ -553,9 +795,16 @@ function renderCommentItems(comments, postId) {
       mediaHtml = mediaCardHtml(c.media, 'comment-' + c.id);
       checkAndDestroyIfExpired(c.media, 'posts/' + postId + '/comments/' + c.id);
     }
+    const canDelete = uid && c.authorUid && c.authorUid === uid;
+    const deleteBtn = canDelete
+      ? `<button class="btn-delete-comment" data-comment-id="${c.id}" title="삭제">${deleteIcon}</button>`
+      : '';
     return `
       <div class="comment-item">
-        <div class="comment-content">${escapeHtml(c.content)}</div>
+        <div class="comment-body">
+          <div class="comment-content">${escapeHtml(c.content)}</div>
+          ${deleteBtn}
+        </div>
         ${mediaHtml}
         <div class="comment-time">${timeAgo(c.createdAt)} 전</div>
       </div>
@@ -635,7 +884,6 @@ async function submitPost() {
   btnSubmitPost.textContent = '검토 중...';
 
   try {
-    // Content moderation check
     const modResult = await checkModeration(title + '\n' + content, 'post');
     if (!modResult.allowed) {
       showModerationAlert(modResult);
@@ -648,6 +896,7 @@ async function submitPost() {
       title,
       content,
       commentCount: 0,
+      authorUid: getCurrentUid() || null,
       createdAt: serverTimestamp(),
       lastActivityAt: serverTimestamp(),
     };
@@ -668,7 +917,7 @@ async function submitPost() {
     showPage(pageList);
     loadThreads();
   } catch (err) {
-    alert('작성에 실패했습니다. 다시 시도해주세요.');
+    alert(err.message || '작성에 실패했습니다. 다시 시도해주세요.');
   } finally {
     btnSubmitPost.disabled = false;
     btnSubmitPost.textContent = '등록';
@@ -681,7 +930,6 @@ async function sendComment() {
   if (!content && !commentMediaFile) return;
   if (!currentPostId) return;
 
-  // 댓글 100개 제한
   const currentCount = parseInt(detailCommentCount.textContent) || 0;
   if (currentCount >= 100) {
     alert('댓글은 최대 100개까지 작성할 수 있습니다.');
@@ -691,7 +939,6 @@ async function sendComment() {
   btnSendComment.disabled = true;
 
   try {
-    // Content moderation check (text only)
     if (content) {
       const modResult = await checkModeration(content, 'comment');
       if (!modResult.allowed) {
@@ -702,10 +949,10 @@ async function sendComment() {
 
     const commentData = {
       content: content || '',
+      authorUid: getCurrentUid() || null,
       createdAt: serverTimestamp(),
     };
 
-    // Upload media if attached
     if (commentMediaFile) {
       const uploaded = await uploadMedia(commentMediaFile);
       const dType = commentDestructType.value;
@@ -723,22 +970,83 @@ async function sendComment() {
     inputComment.value = '';
     clearCommentMedia();
 
-    // Reload comments
-    const commentsSnap = await getDocs(
-      query(
-        collection(db, 'posts', currentPostId, 'comments'),
-        orderBy('createdAt', 'asc')
-      )
-    );
-    const comments = commentsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-    detailCommentCount.textContent = commentsSnap.size;
-    renderComments(comments, currentPostId);
-
-    commentListEl.lastElementChild?.scrollIntoView({ behavior: 'smooth' });
+    // Comments will update automatically via onSnapshot
+    // Scroll to bottom after a short delay
+    setTimeout(() => {
+      commentListEl.lastElementChild?.scrollIntoView({ behavior: 'smooth' });
+    }, 500);
   } catch (err) {
     alert('댓글 작성에 실패했습니다.');
   } finally {
     btnSendComment.disabled = false;
+  }
+}
+
+// === Delete Post ===
+async function deletePost() {
+  if (!currentPostId) return;
+
+  if (!confirm('이 스레드를 삭제하시겠습니까? 모든 댓글도 함께 삭제됩니다.')) return;
+
+  try {
+    // Delete all comments first
+    const commentsSnap = await getDocs(collection(db, 'posts', currentPostId, 'comments'));
+    const deletePromises = commentsSnap.docs.map(async (commentDoc) => {
+      const commentData = commentDoc.data();
+      // Delete comment media if exists
+      if (commentData.media?.storagePath) {
+        try { await deleteObject(ref(storage, commentData.media.storagePath)); } catch (e) { /* ignore */ }
+      }
+      return deleteDoc(commentDoc.ref);
+    });
+    await Promise.all(deletePromises);
+
+    // Delete post media if exists
+    const postSnap = await getDoc(doc(db, 'posts', currentPostId));
+    if (postSnap.exists()) {
+      const postData = postSnap.data();
+      if (postData.media?.storagePath) {
+        try { await deleteObject(ref(storage, postData.media.storagePath)); } catch (e) { /* ignore */ }
+      }
+    }
+
+    // Delete the post
+    await deleteDoc(doc(db, 'posts', currentPostId));
+
+    showPage(pageList);
+    loadThreads();
+  } catch (err) {
+    alert('삭제에 실패했습니다.');
+  }
+}
+
+// === Delete Comment ===
+async function deleteComment(commentId) {
+  if (!currentPostId || !commentId) return;
+
+  if (!confirm('이 댓글을 삭제하시겠습니까?')) return;
+
+  try {
+    const commentRef = doc(db, 'posts', currentPostId, 'comments', commentId);
+    const commentSnap = await getDoc(commentRef);
+
+    if (commentSnap.exists()) {
+      const commentData = commentSnap.data();
+      // Delete media if exists
+      if (commentData.media?.storagePath) {
+        try { await deleteObject(ref(storage, commentData.media.storagePath)); } catch (e) { /* ignore */ }
+      }
+    }
+
+    await deleteDoc(commentRef);
+
+    await updateDoc(doc(db, 'posts', currentPostId), {
+      commentCount: increment(-1),
+    });
+
+    // Comments will update automatically via onSnapshot
+  } catch (err) {
+    alert('댓글 삭제에 실패했습니다.');
   }
 }
 
@@ -759,12 +1067,10 @@ function clearCommentMedia() {
 
 // === Anti-Screenshot Protections ===
 function setupProtections() {
-  // Prevent context menu when viewer is open
   document.addEventListener('contextmenu', e => {
     if (viewerOpen) e.preventDefault();
   });
 
-  // Block keyboard shortcuts
   document.addEventListener('keydown', e => {
     if (!viewerOpen) return;
     if (
@@ -780,21 +1086,18 @@ function setupProtections() {
     if (e.key === 'Escape') closeViewer();
   });
 
-  // Blur on visibility change (tab switch, screenshot tools)
   document.addEventListener('visibilitychange', () => {
     if (viewerOpen && document.hidden) {
       viewerBody.classList.add('viewer-blurred');
     }
   });
 
-  // Blur on window blur
   window.addEventListener('blur', () => {
     if (viewerOpen) {
       viewerBody.classList.add('viewer-blurred');
     }
   });
 
-  // Unblur on focus return
   window.addEventListener('focus', () => {
     if (viewerOpen) {
       setTimeout(() => viewerBody.classList.remove('viewer-blurred'), 300);
@@ -839,6 +1142,13 @@ btnAttachPost.addEventListener('click', () => fileInputPost.click());
 fileInputPost.addEventListener('change', () => {
   const file = fileInputPost.files[0];
   if (!file) return;
+
+  if (file.size > MAX_FILE_SIZE) {
+    alert('파일 크기가 10MB를 초과합니다.');
+    fileInputPost.value = '';
+    return;
+  }
+
   postMediaFile = file;
   showThumbPreview(file, postMediaThumb);
   postMediaPreview.classList.remove('hidden');
@@ -861,6 +1171,13 @@ btnAttachComment.addEventListener('click', () => fileInputComment.click());
 fileInputComment.addEventListener('change', () => {
   const file = fileInputComment.files[0];
   if (!file) return;
+
+  if (file.size > MAX_FILE_SIZE) {
+    alert('파일 크기가 10MB를 초과합니다.');
+    fileInputComment.value = '';
+    return;
+  }
+
   commentMediaFile = file;
   showThumbPreview(file, commentMediaThumb);
   commentMediaPreview.classList.remove('hidden');
@@ -881,6 +1198,15 @@ commentDestructType.addEventListener('change', () => {
 // 정주행 button
 commentListEl.addEventListener('click', (e) => {
   if (e.target.id === 'btn-show-all') showAllComments();
+});
+
+// Delete comment button delegation
+commentListEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('.btn-delete-comment');
+  if (btn) {
+    e.stopPropagation();
+    deleteComment(btn.dataset.commentId);
+  }
 });
 
 // Viewer close
@@ -913,8 +1239,56 @@ passModal.addEventListener('click', (e) => {
   if (e.target === passModal) closePassModal();
 });
 
+// === Delete Post Button ===
+if (btnDeletePost) {
+  btnDeletePost.addEventListener('click', deletePost);
+}
+
+// === Search Event Listeners ===
+if (searchInput) {
+  let searchTimeout;
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => {
+      filterThreads(searchInput.value);
+    }, 300);
+  });
+
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      searchInput.value = '';
+      filterThreads('');
+      searchInput.blur();
+    }
+  });
+}
+
+if (btnSearchClear) {
+  btnSearchClear.addEventListener('click', () => {
+    searchInput.value = '';
+    filterThreads('');
+    searchInput.focus();
+  });
+}
+
+// === Infinite Scroll ===
+window.addEventListener('scroll', () => {
+  if (!pageList.classList.contains('hidden') && !searchQuery) {
+    const scrollBottom = window.innerHeight + window.scrollY;
+    const docHeight = document.documentElement.scrollHeight;
+
+    if (scrollBottom >= docHeight - 200) {
+      loadMoreThreads();
+    }
+  }
+});
+
 // === Init ===
 setupProtections();
+
+// Ensure anonymous auth for UID tracking
+signInAnonymously(auth).catch(() => {});
+
 if (checkAdultGate()) {
   showPage(pageList);
   loadThreads();
