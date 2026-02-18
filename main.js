@@ -49,6 +49,7 @@ const auth = getAuth(app);
 
 // === Constants ===
 const PAGE_SIZE = 20;
+const COMMENT_PAGE_SIZE = 20;
 const MAX_IMAGE_DIMENSION = 1920;
 const IMAGE_QUALITY = 0.8;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
@@ -120,6 +121,11 @@ const btnSearchClear = document.getElementById('btn-search-clear');
 const detailActions = document.getElementById('detail-actions');
 const btnDeletePost = document.getElementById('btn-delete-post');
 
+// Reply DOM refs
+const replyIndicator = document.getElementById('reply-indicator');
+const replyIndicatorText = document.getElementById('reply-indicator-text');
+const replyIndicatorClose = document.getElementById('reply-indicator-close');
+
 // === State ===
 let currentPostId = null;
 let postMediaFile = null;
@@ -138,6 +144,13 @@ let commentsUnsubscribe = null;
 
 // Search state
 let searchQuery = '';
+
+// Comment pagination state
+let showAllCommentsFlag = false;
+
+// Reply state
+let replyToId = null;
+let replyToPreview = '';
 
 // PortOne
 const IMP = window.IMP;
@@ -367,6 +380,14 @@ const destroyedIcon = `<svg width="16" height="16" viewBox="0 0 24 24" fill="non
 
 const deleteIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
   <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+</svg>`;
+
+const replyIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+  <polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 00-4-4H4"/>
+</svg>`;
+
+const replySmallIcon = `<svg class="comment-reply-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+  <polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 00-4-4H4"/>
 </svg>`;
 
 // === Media Upload ===
@@ -704,6 +725,8 @@ async function loadDetail(postId) {
   detailMediaData = null;
   detailMediaDocPath = null;
   detailPostAuthorUid = null;
+  showAllCommentsFlag = false;
+  clearReply();
 
   // Hide delete button by default
   if (btnDeletePost) btnDeletePost.classList.add('hidden');
@@ -785,6 +808,10 @@ let allCommentsPostId = null;
 
 function renderCommentItems(comments, postId) {
   const uid = getCurrentUid();
+  // Build a map for reply preview lookup
+  const commentMap = {};
+  allComments.forEach(c => { commentMap[c.id] = c; });
+
   return comments.map(c => {
     let mediaHtml = '';
     if (c.media) {
@@ -795,14 +822,28 @@ function renderCommentItems(comments, postId) {
       mediaHtml = mediaCardHtml(c.media, 'comment-' + c.id);
       checkAndDestroyIfExpired(c.media, 'posts/' + postId + '/comments/' + c.id);
     }
+
+    // Reply preview
+    let replyHtml = '';
+    if (c.replyTo) {
+      const originalComment = commentMap[c.replyTo];
+      const preview = c.replyPreview || (originalComment ? originalComment.content : '');
+      const truncated = preview.length > 50 ? preview.slice(0, 50) + '...' : preview;
+      replyHtml = `<div class="comment-reply-preview" data-reply-to="${c.replyTo}">${replySmallIcon}<span class="comment-reply-text">${escapeHtml(truncated)}</span></div>`;
+    }
+
     const canDelete = uid && c.authorUid && c.authorUid === uid;
     const deleteBtn = canDelete
       ? `<button class="btn-delete-comment" data-comment-id="${c.id}" title="삭제">${deleteIcon}</button>`
       : '';
+    const replyBtn = `<button class="btn-reply-comment" data-comment-id="${c.id}" data-comment-content="${escapeHtml(c.content)}" title="답글">${replyIcon}</button>`;
+
     return `
-      <div class="comment-item">
+      <div class="comment-item" data-comment-id="${c.id}">
+        ${replyHtml}
         <div class="comment-body">
           <div class="comment-content">${escapeHtml(c.content)}</div>
+          ${replyBtn}
           ${deleteBtn}
         </div>
         ${mediaHtml}
@@ -822,12 +863,12 @@ function renderComments(comments, postId) {
     return;
   }
 
-  if (comments.length > 10) {
-    const last10 = comments.slice(-10);
-    const hiddenCount = comments.length - 10;
+  if (!showAllCommentsFlag && comments.length > COMMENT_PAGE_SIZE) {
+    const visible = comments.slice(-COMMENT_PAGE_SIZE);
+    const hiddenCount = comments.length - COMMENT_PAGE_SIZE;
     commentListEl.innerHTML =
       `<button class="btn-show-all-comments" id="btn-show-all">정주행 (${hiddenCount}개 더 보기)</button>` +
-      renderCommentItems(last10, postId);
+      renderCommentItems(visible, postId);
   } else {
     commentListEl.innerHTML = renderCommentItems(comments, postId);
   }
@@ -835,8 +876,9 @@ function renderComments(comments, postId) {
 
 function showAllComments() {
   if (!allComments.length) return;
+  showAllCommentsFlag = true;
   commentMediaMap = {};
-  commentListEl.innerHTML = renderCommentItems(allComments, allCommentsPostId);
+  renderComments(allComments, allCommentsPostId);
   commentListEl.firstElementChild?.scrollIntoView({ behavior: 'smooth' });
 }
 
@@ -953,6 +995,12 @@ async function sendComment() {
       createdAt: serverTimestamp(),
     };
 
+    // Attach reply reference
+    if (replyToId) {
+      commentData.replyTo = replyToId;
+      commentData.replyPreview = replyToPreview.slice(0, 100);
+    }
+
     if (commentMediaFile) {
       const uploaded = await uploadMedia(commentMediaFile);
       const dType = commentDestructType.value;
@@ -969,6 +1017,7 @@ async function sendComment() {
 
     inputComment.value = '';
     clearCommentMedia();
+    clearReply();
 
     // Comments will update automatically via onSnapshot
     // Scroll to bottom after a short delay
@@ -1063,6 +1112,50 @@ function clearCommentMedia() {
   commentMediaPreview.classList.add('hidden');
   commentMediaThumb.innerHTML = '';
   fileInputComment.value = '';
+}
+
+// === Reply Helpers ===
+function setReply(commentId, content) {
+  replyToId = commentId;
+  replyToPreview = content;
+  const truncated = content.length > 40 ? content.slice(0, 40) + '...' : content;
+  replyIndicatorText.textContent = truncated;
+  replyIndicator.classList.remove('hidden');
+  updateInputStackPositions();
+  inputComment.focus();
+}
+
+function clearReply() {
+  replyToId = null;
+  replyToPreview = '';
+  replyIndicator.classList.add('hidden');
+  updateInputStackPositions();
+}
+
+function updateInputStackPositions() {
+  const hasReply = !replyIndicator.classList.contains('hidden');
+  const hasMedia = !commentMediaPreview.classList.contains('hidden');
+  const barHeight = 64;
+  const replyHeight = 40;
+
+  if (hasReply && hasMedia) {
+    replyIndicator.style.bottom = barHeight + 'px';
+    commentMediaPreview.style.bottom = (barHeight + replyHeight) + 'px';
+  } else if (hasReply) {
+    replyIndicator.style.bottom = barHeight + 'px';
+  } else if (hasMedia) {
+    commentMediaPreview.style.bottom = barHeight + 'px';
+  }
+}
+
+function scrollToComment(commentId) {
+  const el = commentListEl.querySelector(`.comment-item[data-comment-id="${commentId}"]`);
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.remove('comment-highlight');
+    void el.offsetWidth;
+    el.classList.add('comment-highlight');
+  }
 }
 
 // === Anti-Screenshot Protections ===
@@ -1181,8 +1274,12 @@ fileInputComment.addEventListener('change', () => {
   commentMediaFile = file;
   showThumbPreview(file, commentMediaThumb);
   commentMediaPreview.classList.remove('hidden');
+  updateInputStackPositions();
 });
-btnRemoveCommentMedia.addEventListener('click', clearCommentMedia);
+btnRemoveCommentMedia.addEventListener('click', () => {
+  clearCommentMedia();
+  updateInputStackPositions();
+});
 
 // Comment destruct type toggle
 commentDestructType.addEventListener('change', () => {
@@ -1208,6 +1305,33 @@ commentListEl.addEventListener('click', (e) => {
     deleteComment(btn.dataset.commentId);
   }
 });
+
+// Reply button delegation
+commentListEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('.btn-reply-comment');
+  if (btn) {
+    e.stopPropagation();
+    setReply(btn.dataset.commentId, btn.dataset.commentContent);
+  }
+});
+
+// Reply preview click → scroll to original comment
+commentListEl.addEventListener('click', (e) => {
+  const preview = e.target.closest('.comment-reply-preview');
+  if (preview) {
+    e.stopPropagation();
+    const targetId = preview.dataset.replyTo;
+    // If comment is hidden (정주행 not expanded), show all first
+    const targetEl = commentListEl.querySelector(`.comment-item[data-comment-id="${targetId}"]`);
+    if (!targetEl && !showAllCommentsFlag) {
+      showAllComments();
+    }
+    setTimeout(() => scrollToComment(targetId), 100);
+  }
+});
+
+// Reply indicator close
+replyIndicatorClose.addEventListener('click', clearReply);
 
 // Viewer close
 viewerClose.addEventListener('click', closeViewer);
