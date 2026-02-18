@@ -1387,6 +1387,16 @@ document.addEventListener('click', (e) => {
 
 // === PASS Event Listeners ===
 btnVerifyCta.addEventListener('click', startCertification);
+
+// Dev bypass button
+const btnDevEnter = document.getElementById('btn-dev-enter');
+if (btnDevEnter) {
+  btnDevEnter.addEventListener('click', () => {
+    setAdultVerified();
+    showPage(pageList);
+    loadThreads();
+  });
+}
 passModalClose.addEventListener('click', closePassModal);
 btnPassEnter.addEventListener('click', enterBoard);
 btnPassRetry.addEventListener('click', () => {
@@ -1444,12 +1454,13 @@ window.addEventListener('scroll', () => {
 // === Init ===
 setupProtections();
 
-// Ensure anonymous auth for UID tracking, then load page
-signInAnonymously(auth).catch(() => {}).finally(() => {
-  if (checkAdultGate()) {
-    showPage(pageList);
-    loadThreads();
-  } else {
-    showPage(pageLanding);
-  }
-});
+// Ensure anonymous auth for UID tracking (background, non-blocking)
+signInAnonymously(auth).catch(() => {});
+
+// Show page immediately without waiting for auth
+if (checkAdultGate()) {
+  showPage(pageList);
+  loadThreads();
+} else {
+  showPage(pageLanding);
+}
